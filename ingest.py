@@ -25,15 +25,14 @@ from langchain.embeddings import HuggingFaceEmbeddings
 from langchain.docstore.document import Document
 from constants import CHROMA_SETTINGS
 
-
-# Load environment variables
+# Load environment variables
 persist_directory = os.environ.get('PERSIST_DIRECTORY', 'db')
 source_directory = os.environ.get('SOURCE_DIRECTORY', 'input_documents')
 embeddings_model_name = os.environ.get('EMBEDDINGS_MODEL_NAME', 'all-MiniLM-L6-v2')
 chunk_size = 500
 chunk_overlap = 50
 
-# Custom document loaders
+# Custom document loader for emails
 class MyElmLoader(UnstructuredEmailLoader):
     """Wrapper to fallback to text/plain when default does not work"""
 
@@ -44,8 +43,7 @@ class MyElmLoader(UnstructuredEmailLoader):
                 doc = UnstructuredEmailLoader.load(self)
             except ValueError as e:
                 if 'text/html content not found in email' in str(e):
-                    # Try plain text
-                    self.unstructured_kwargs["content_source"]="text/plain"
+                    self.unstructured_kwargs["content_source"] = "text/plain"
                     doc = UnstructuredEmailLoader.load(self)
                 else:
                     raise
@@ -55,11 +53,9 @@ class MyElmLoader(UnstructuredEmailLoader):
 
         return doc
 
-
-# Map file extensions to document loaders and their arguments
+# Map file extensions to document loaders
 LOADER_MAPPING = {
     ".csv": (CSVLoader, {}),
-    # ".docx": (Docx2txtLoader, {}),
     ".doc": (UnstructuredWordDocumentLoader, {}),
     ".docx": (UnstructuredWordDocumentLoader, {}),
     ".enex": (EverNoteLoader, {}),
@@ -72,9 +68,7 @@ LOADER_MAPPING = {
     ".ppt": (UnstructuredPowerPointLoader, {}),
     ".pptx": (UnstructuredPowerPointLoader, {}),
     ".txt": (TextLoader, {"encoding": "utf8"}),
-    # Add more mappings for other file extensions and loaders as needed
 }
-
 
 def load_single_document(file_path: str) -> List[Document]:
     ext = "." + file_path.rsplit(".", 1)[-1]
@@ -134,27 +128,51 @@ def does_vectorstore_exist(persist_directory: str) -> bool:
     return False
 
 def main():
-    # Create embeddings
-    embeddings = HuggingFaceEmbeddings(model_name=embeddings_model_name)
+    os.environ["HF_HUB_DISABLE_SSL_VERIFY"] = "1"  # Temporary SSL bypass
+
+    try:
+        print(f"Loading embeddings model: {embeddings_model_name}")
+        embeddings = HuggingFaceEmbeddings(model_name=embeddings_model_name)
+        print("Embeddings model loaded successfully.")
+    except Exception as e:
+        print(f"Error loading embeddings model from Hugging Face: {e}")
+        print("Attempting to use a local model...")
+
+        # Fallback to local model path
+        local_model_path = os.path.join("models", embeddings_model_name)
+        if os.path.exists(local_model_path):
+            try:
+                embeddings = HuggingFaceEmbeddings(model_name=local_model_path)
+                print("Local embeddings model loaded successfully.")
+            except Exception as local_e:
+                print(f"Error loading local embeddings model: {local_e}")
+                raise RuntimeError("Failed to load embeddings model.")
+        else:
+            raise RuntimeError(
+                "Neither the remote nor the local embeddings model could be loaded. "
+                "Please manually download the model to the 'models/' directory."
+            )
 
     if does_vectorstore_exist(persist_directory):
-        # Update and store locally vectorstore
         print(f"Appending to existing vectorstore at {persist_directory}")
-        db = Chroma(persist_directory=persist_directory, embedding_function=embeddings, client_settings=CHROMA_SETTINGS)
+        db = Chroma(
+            persist_directory=persist_directory,
+            embedding_function=embeddings,
+            client_settings=CHROMA_SETTINGS,
+        )
         collection = db.get()
         texts = process_documents([metadata['source'] for metadata in collection['metadatas']])
-        print(f"Creating embeddings. May take some minutes...")
+        print("Creating embeddings. This may take a few minutes...")
         db.add_documents(texts)
     else:
-        # Create and store locally vectorstore
         print("Creating new vectorstore")
         texts = process_documents()
-        print(f"Creating embeddings. May take some minutes...")
+        print("Creating embeddings. This may take a few minutes...")
         db = Chroma.from_documents(texts, embeddings, persist_directory=persist_directory)
+
     db.persist()
     db = None
-
-    print(f"Ingestion complete! You can now run privateGPT.py to query your documents")
+    print("Ingestion complete! You can now run privateGPT.py to query your documents.")
 
 
 if __name__ == "__main__":
